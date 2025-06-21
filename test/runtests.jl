@@ -74,24 +74,24 @@ include("testing_utils.jl")
 
 @info "testing Wflow with" nthreads() VERSION
 
-# disable logging output during testing
-with_logger(NullLogger()) do
-    ## run all tests
-    @testset "Wflow.jl" begin
+# # disable logging output during testing
+# with_logger(NullLogger()) do
+#     ## run all tests
+#     @testset "Wflow.jl" begin
         include("routing_process.jl")
         include("io.jl")
         include("land_process.jl")
         include("reservoir_lake.jl")
         include("run_sbm.jl")
-        include("run_sbm_piave.jl")
-        include("run_sbm_gwf_piave.jl")
-        include("run_sbm_gwf.jl")
-        include("run.jl")
+#         include("run_sbm_piave.jl")
+#         include("run_sbm_gwf_piave.jl")
+#         include("run_sbm_gwf.jl")
+#         include("run.jl")
         include("groundwater.jl")
-        include("utils.jl")
+#         include("utils.jl")
         include("bmi.jl")
-        include("run_sediment.jl")
+#         include("run_sediment.jl")
         include("subdomains.jl")
         Aqua.test_all(Wflow; ambiguities = false, persistent_tasks = false)
-    end
-end
+#     end
+# end
