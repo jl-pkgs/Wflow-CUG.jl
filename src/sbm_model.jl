@@ -1,3 +1,9 @@
+export input_path
+export NCDataset, prepare_reader, prepare_writer, Clock
+export get_routing_types, Routing, LandHydrologySBM
+export Domain
+export Model, SbmModel, set_states!
+
 """
     Model(config::Config, type::SbmModel)
 
