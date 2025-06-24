@@ -30,7 +30,8 @@ modelsettings = (;
 @info "General model settings" modelsettings[keys(modelsettings)[1:7]]...
 
 routing_types = get_routing_types(config)
-domain = Domain(dataset, config, modelsettings, routing_types)
+@run domain = Domain(dataset, config, modelsettings, routing_types);
+
 
 land_hydrology = LandHydrologySBM(dataset, config, domain.land)
 routing = Routing(dataset, config, domain, land_hydrology.soil, routing_types, type)
