@@ -17,14 +17,10 @@ model = Wflow.Model(config, type)
 Wflow.run_timestep!(model)
 
 
-
-
 ## update_boundary_conditions!
 
 # 土壤模型的边界条件更新： soil.jl:610-615
 # 径流模型： runoff.jl:82-90
-
-
 
 
 

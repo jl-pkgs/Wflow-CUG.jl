@@ -163,12 +163,11 @@ function kinwave_set_subdomains(graph, toposort, index_pit, streamorder, min_sto
             index_toposort[j] = i
         end
 
-        order_subbas   = Vector{Vector{Int}}()
+        order_subbas = Vector{Vector{Int}}()
         indices_subbas = Vector{Vector{Int}}()
-        topo_subbas    = Vector{Vector{Int}}()
+        topo_subbas = Vector{Vector{Int}}()
         index = Vector{Int}()
         total_subbas = 0
-
         for i in 1:n_pits
             # extract subbasins per basin, make a graph at the subbasin level, calculate the
             # maximum distance of this graph, and group and order the subbasin ids from
@@ -177,10 +176,8 @@ function kinwave_set_subdomains(graph, toposort, index_pit, streamorder, min_sto
             g, vmap = induced_subgraph(graph, basin)
             toposort_b = topological_sort_by_dfs(g)
             streamorder_subbas = streamorder[vmap]
-
             subbas = subbasins(g, streamorder_subbas, toposort_b, min_sto)
             subbas_fill = fillnodata_upstream(g, toposort_b, subbas, 0)
-            
             n_subbas = max(length(subbas[subbas .> 0]), 1)
             if n_subbas > 1
                 graph_subbas = graph_from_nodes(g, subbas, subbas_fill)

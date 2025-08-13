@@ -71,15 +71,15 @@ function LateralSsfParameters(
 
     kh_profile_type =
         get(config.model, "saturated_hydraulic_conductivity_profile", "exponential")::String
-    dt = Second(config.time.timestepsecs) / BASETIMESTEP
+    factor_dt = BASETIMESTEP / Second(config.time.timestepsecs)
     if kh_profile_type == "exponential"
         (; kv_0, f) = soil.kv_profile
-        kh_0 = khfrac .* kv_0 .* 0.001 .* dt
+        kh_0 = khfrac .* kv_0 .* 0.001 .* factor_dt
         kh_profile = KhExponential(kh_0, f .* 1000.0)
     elseif kh_profile_type == "exponential_constant"
         (; z_exp) = soil.kv_profile
         (; kv_0, f) = soil.kv_profile.exponential
-        kh_0 = khfrac .* kv_0 .* 0.001 .* dt
+        kh_0 = khfrac .* kv_0 .* 0.001 .* factor_dt
         exp_profile = KhExponential(kh_0, f .* 1000.0)
         kh_profile = KhExponentialConstant(exp_profile, z_exp .* 0.001)
     elseif kh_profile_type == "layered" || kh_profile_type == "layered_exponential"
@@ -144,10 +144,10 @@ function update!(model::LateralSSF, domain::DomainLand, dt::Float64)
         threaded_foreach(eachindex(order_of_subdomains[k]); basesize = 1) do i
             m = order_of_subdomains[k][i]
             for (n, v) in zip(subdomain_indices[m], order_subdomain[m])
-                # for a river cell without a reservoir or lake part of the upstream
-                # subsurface flow goes to the river (flow_fraction_to_river) and part goes
-                # to the subsurface flow reservoir (1.0 - flow_fraction_to_river) upstream
-                # nodes with a reservoir or lake are excluded
+                # for a river cell without a reservoir part of the upstream subsurface flow
+                # goes to the river (flow_fraction_to_river) and part goes to the subsurface
+                # flow reservoir (1.0 - flow_fraction_to_river) upstream nodes with a
+                # reservoir are excluded
                 ssfin[v] = sum_at(
                     i -> ssf[i] * (1.0 - flow_fraction_to_river[i]),
                     upstream_nodes[n],

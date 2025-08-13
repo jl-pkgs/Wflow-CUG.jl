@@ -2,11 +2,9 @@
 """
     rainfall_interception_gash(cmax, e_r, canopygapfraction, precipitation, canopystorage, maxevap)
 
-Interception according to the Gash model (for daily timesteps). 
-    
-- `cmax` is the maximum canopy storage and 
-- `e_r` is the ratio of the average evaporation from the wet canopy and the
-  average precipitation intensity on a saturated canopy.
+Interception according to the Gash model (for daily timesteps). `cmax` is the maximum canopy
+storage and `e_r` is the ratio of the average evaporation from the wet canopy and the
+average precipitation intensity on a saturated canopy.
 """
 function rainfall_interception_gash(
     cmax,
@@ -68,7 +66,7 @@ function rainfall_interception_modrut(
 )
 
     # TODO: improve computation of stemflow partitioning coefficient pt (0.1 * canopygapfraction)
-    pt = min(0.1 * canopygapfraction, 1.0 - canopygapfraction) # 树干流比例
+    pt = min(0.1 * canopygapfraction, 1.0 - canopygapfraction)
 
     # Amount of p that falls on the canopy
     precip_canopy = (1.0 - canopygapfraction - pt) * precipitation
