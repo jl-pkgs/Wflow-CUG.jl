@@ -1,0 +1,4 @@
+ignore:
+  - "src/sediment/*"
+  - "src/sediment_flux.jl"
+  - "src/sediment_model.jl"
