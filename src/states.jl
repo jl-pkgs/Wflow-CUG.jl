@@ -1,101 +1,65 @@
+get_states_by_tag(model_type::Type, tag::Symbol) =
+    [name for (name, metadata) in get_standard_name_map(model_type) if tag in metadata.tags]
+
 """
-    get_snow_states(model_type::AbstractString)
+    get_snow_states(model_type::ModelType.T)
 
 Extract required snow model states, given a certain `model_type`. Returns a tuple with the
 required states (standard name).
 """
-function get_snow_states(model_type::AbstractString)
-    if model_type == "sbm" || model_type == "sbm_gwf"
-        states = ("snowpack~dry__leq-depth", "snowpack~liquid__depth")
-    elseif model_type == "sediment"
-        states = ()
-    else
-        throw(ArgumentError("Unknown model_type provided (`$model_type`)"))
+function get_snow_states(model_type::ModelType.T)
+    return if model_type == ModelType.sbm || model_type == ModelType.sbm_gwf
+        get_states_by_tag(LandHydrologySBM, :snow_state)
+    elseif model_type == ModelType.sediment
+        String[]
     end
-    return states
 end
 
 """
-    get_glacier_states(model_type::AbstractString)
+    get_glacier_states(model_type::ModelType.T)
 
 Extract required glacier model states, given a certain `model_type`. Returns a tuple with
 the required states (standard name).
 """
-function get_glacier_states(model_type::AbstractString)
-    if model_type == "sbm" || model_type == "sbm_gwf"
-        states = ("glacier_ice__leq-depth",)
-    elseif model_type == "sediment"
-        states = ()
-    else
-        throw(ArgumentError("Unknown model_type provided (`$model_type`)"))
+function get_glacier_states(model_type::ModelType.T)
+    return if model_type == ModelType.sbm || model_type == ModelType.sbm_gwf
+        get_states_by_tag(LandHydrologySBM, :glacier_state)
+    elseif model_type == ModelType.sediment
+        String[]
     end
-    return states
 end
 
 """
-    get_interception_states(model_type::AbstractString)
+    get_interception_states(model_type::ModelType.T)
 
 Extract required interception model states, given a certain `model_type`. Returns a tuple
 with the required states (standard name).
 """
-function get_interception_states(model_type::AbstractString)
-    if model_type == "sbm" || model_type == "sbm_gwf"
-        states = ("vegetation_canopy_water__depth",)
-    elseif model_type == "sediment"
-        states = ()
-    else
-        throw(ArgumentError("Unknown model_type provided (`$model_type`)"))
+function get_interception_states(model_type::ModelType.T)
+    return if model_type == ModelType.sbm || model_type == ModelType.sbm_gwf
+        get_states_by_tag(LandHydrologySBM, :vegetation_state)
+    elseif model_type == ModelType.sediment
+        String[]
     end
-    return states
 end
 
 """
-    get_soil_states(model_type::AbstractString; snow = false)
+    get_soil_states(model_type::ModelType.T; snow = false)
 
 Extract required soil model states, given a certain `model_type` and whether `snow` is
 modelled. Returns a tuple with the required states (internal names as symbols).
 """
-function get_soil_states(model_type::AbstractString; snow = false)
-    if model_type == "sbm" || model_type == "sbm_gwf"
-        if snow
-            states = (
-                "soil_water_sat-zone__depth",
-                "soil_surface__temperature",
-                "soil_layer_water_unsat-zone__depth",
-            )
-        else
-            states = ("soil_water_sat-zone__depth", "soil_layer_water_unsat-zone__depth")
-        end
-    elseif model_type == "sediment"
-        states = ()
-    else
-        throw(ArgumentError("Unknown model_type provided (`$model_type`)"))
+function get_soil_states(model_type::ModelType.T; snow::Bool = false)
+    return if model_type == ModelType.sbm || model_type == ModelType.sbm_gwf
+        states = get_states_by_tag(LandHydrologySBM, :soil_state)
+        snow ? states : filter(!=("soil_surface__temperature"), states)
+    elseif model_type == ModelType.sediment
+        String[]
     end
-    return states
 end
 
 function get_sediment_states()
-    states = (
-        "river_water_clay__mass",
-        "river_bed_clay__mass",
-        "river_water_gravel__mass",
-        "river_bed_gravel__mass",
-        "river_water_aggregates~large__mass",
-        "river_bed_aggregates~large__mass",
-        "river_water_clay__mass_flow_rate",
-        "river_water_gravel__mass_flow_rate",
-        "river_water_aggregates~large__mass_flow_rate",
-        "river_water_aggregates~small__mass_flow_rate",
-        "river_water_sand__mass_flow_rate",
-        "river_water_silt__mass_flow_rate",
-        "river_water_aggregates~small__mass",
-        "river_bed_aggregates~small__mass",
-        "river_water_sand__mass",
-        "river_bed_sand__mass",
-        "river_water_silt__mass",
-        "river_bed_silt__mass",
-    )
-    return states
+    return get_states_by_tag(SoilLossModel, :sediment_river_transport_state)
 end
 
 """
@@ -108,104 +72,91 @@ Returns as list of required states, in the same formats as the keys that are ret
 """
 function extract_required_states(config::Config)
     # Extract model type
-    model_type = config.model.type::String
+    model_type = config.model.type
 
     # Extract model settings
-    do_snow = get(config.model, "snow__flag", false)::Bool
-    do_glaciers = get(config.model, "glacier__flag", false)::Bool
-    do_reservoirs = get(config.model, "reservoir__flag", false)::Bool
-    do_floodplains = get(config.model, "floodplain_1d__flag", false)::Bool
-    do_paddy = false
-    if haskey(config.model, "water_demand")
-        do_paddy = get(config.model.water_demand, "paddy__flag", false)::Bool
-    end
+    do_snow = config.model.snow__flag
+    do_glaciers = config.model.glacier__flag
+    do_reservoirs = config.model.reservoir__flag
+    do_floodplains = config.model.floodplain_1d__flag
+    do_paddy = config.model.water_demand.paddy__flag
 
     # Extract required stated based on model configuration file
     if do_snow
         snow_states = get_snow_states(model_type)
     else
-        snow_states = ()
+        snow_states = String[]
     end
     if do_snow && do_glaciers
         glacier_states = get_glacier_states(model_type)
     else
-        glacier_states = ()
+        glacier_states = String[]
     end
     interception_states = get_interception_states(model_type)
     soil_states = get_soil_states(model_type; snow = do_snow)
 
     # Subsurface states
-    if model_type == "sbm_gwf"
-        ssf_states = ("subsurface_water__hydraulic_head",)
-    elseif model_type == "sbm"
-        ssf_states = ("subsurface_water__volume_flow_rate",)
-    else
-        ssf_states = ()
+    ssf_states = if model_type == ModelType.sbm_gwf
+        ["subsurface_water__hydraulic_head"]
+    elseif model_type == ModelType.sbm
+        ["subsurface_water__instantaneous_volume_flow_rate"]
+    else # model_type == ModelType.sediment
+        String[]
     end
 
     # Land states
-    if model_type == "sediment"
-        land_states = ()
+    land_states = if model_type == ModelType.sediment
+        String[]
     else
-        routing_options = ("kinematic-wave", "local-inertial")
-        land_routing = get_options(
-            config.model,
-            "land_routing",
-            routing_options,
-            "kinematic-wave",
-        )::String
-        if land_routing == "local-inertial"
-            land_states = (
-                "land_surface_water__x_component_of_instantaneous_volume_flow_rate",
-                "land_surface_water__y_component_of_instantaneous_volume_flow_rate",
-                "land_surface_water__instantaneous_depth",
-            )
+        if config.model.land_routing == RoutingType.local_inertial
+            get_states_by_tag(Routing, :local_inertial_overland_state)
         else
-            land_states = (
-                "land_surface_water__instantaneous_volume_flow_rate",
-                "land_surface_water__instantaneous_depth",
-            )
+            get_states_by_tag(Routing, :kinematic_wave_overland_state)
         end
     end
 
     # River states
-    if model_type == "sediment"
+    river_states = if model_type == ModelType.sediment
         river_states = get_sediment_states()
     else
-        river_states = (
-            "river_water__instantaneous_volume_flow_rate",
-            "river_water__instantaneous_depth",
-        )
+        # :local_inertial_river_state yields the same results
+        get_states_by_tag(Routing, :kinematic_wave_river_state)
     end
 
     # Floodplain states
-    floodplain_states =
-        do_floodplains ?
-        (
-            "floodplain_water__instantaneous_volume_flow_rate",
-            "floodplain_water__instantaneous_depth",
-        ) : ()
+    floodplain_states = if !do_floodplains
+        String[]
+    else
+        if config.model.river_routing == RoutingType.local_inertial ||
+           config.model.river_routing == RoutingType.manning_staggered
+            get_states_by_tag(Routing, :staggered_grid_floodplain_1D_flow_state)
+        else
+            get_states_by_tag(Routing, :kinematic_wave_floodplain_1D_flow_state)
+        end
+    end
 
     # Reservoir states
     reservoir_states =
-        do_reservoirs && model_type !== "sediment" ?
-        ("reservoir_water_surface__instantaneous_elevation",) : ()
+        do_reservoirs && model_type !== ModelType.sediment ?
+        get_states_by_tag(Routing, :reservoir_state) : String[]
 
     # Paddy states
-    paddy_states = do_paddy ? ("land_surface_water~paddy__depth",) : ()
+    paddy_states =
+        do_paddy ? get_states_by_tag(LandHydrologySBM, :demand_paddy_irrigation_state) :
+        String[]
 
-    # Add required states to a tuple, similar to the keys in the output of
-    # `ncnames(config.state.variables)`
-    required_states = snow_states...,
-    glacier_states...,
-    interception_states...,
-    soil_states...,
-    ssf_states...,
-    land_states...,
-    river_states...,
-    floodplain_states...,
-    reservoir_states...,
-    paddy_states...
+    required_states = vcat(
+        snow_states,
+        glacier_states,
+        interception_states,
+        soil_states,
+        ssf_states,
+        land_states,
+        river_states,
+        floodplain_states,
+        reservoir_states,
+        paddy_states,
+    )
 
     return required_states
 end
@@ -226,7 +177,7 @@ function check_states(config::Config)
 
     # Flag to keep track of whether to throw an error
     error = false
-    missing_states = ()
+    missing_states = String[]
     # Check if all states are covered
     for state in required_states
         if !haskey(state_ncnames, state)
@@ -235,7 +186,7 @@ function check_states(config::Config)
                 "correctly in the model configuration",
             )
             error = true
-            missing_states = (missing_states..., state)
+            missing_states = push!(missing_states, state)
         end
     end
     # Throw error when not all states are covered

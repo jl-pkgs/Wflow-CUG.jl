@@ -1,0 +1,89 @@
+"""
+    surface_routing!(model)
+
+Run surface routing (land and river) for a single timestep. Kinematic wave for overland flow
+and kinematic wave or local inertial model for river flow.
+"""
+function surface_routing!(model)
+    (; land, routing, domain, config, clock) = model
+    (; soil, runoff, allocation) = land
+    (; overland_flow, river_flow, subsurface_flow) = routing
+    (; reservoir) = river_flow.boundary_conditions
+
+    dt = tosecond(clock.dt)
+    # update lateral inflow for kinematic wave overland flow
+    update_lateral_inflow!(
+        overland_flow,
+        (; soil, allocation, subsurface_flow),
+        domain,
+        config,
+        dt,
+    )
+    # run kinematic wave overland flow
+    update_overland_flow_model!(overland_flow, domain.land, dt)
+
+    # update lateral inflow river flow
+    update_lateral_inflow!(
+        river_flow,
+        (; allocation = river_flow.allocation, runoff, overland_flow, subsurface_flow),
+        domain,
+        dt,
+    )
+    # update reservoir inflow (overland and subsurface flow), inflow from river flow is
+    # added within the river routing scheme
+    update_inflow!(
+        reservoir,
+        river_flow,
+        (; overland_flow, subsurface_flow),
+        domain.reservoir.network,
+    )
+    if using_observed_outflow(reservoir, config)
+        @debug log_message_observed_outflow(reservoir)
+    end
+    # update river flow
+    update_river_flow_model!(river_flow, domain, clock, dt)
+    return nothing
+end
+
+"""
+    surface_routing!(
+    model::Model{R},
+) where {
+    R <: Routing{
+        <:OverlandFlowModel{<:LocalInertial},
+        <:RiverFlowModel{<:LocalInertial},
+    },
+}
+
+Run surface routing (land and river) for a model type that contains the routing components
+`OverlandFlowModel{<:LocalInertial}` and `RiverFlowModel{<:LocalInertial}` for a single
+timestep.
+"""
+function surface_routing!(
+    model::Model{R},
+) where {
+    R <: Routing{<:OverlandFlowModel{<:LocalInertial}, <:RiverFlowModel{<:LocalInertial}},
+}
+    (; routing, land, domain, clock, config) = model
+    (; soil, runoff) = land
+    (; overland_flow, river_flow, subsurface_flow) = routing
+    (; reservoir) = river_flow.boundary_conditions
+
+    dt = tosecond(clock.dt)
+    update_bc_overland_flow_model!(
+        overland_flow,
+        (; soil, runoff, subsurface_flow),
+        domain,
+        dt,
+    )
+    # update reservoir inflow (subsurface flow), inflow from river and overland flow is
+    # added within the river and overland routing schemes
+    update_inflow!(reservoir, river_flow, subsurface_flow, domain.reservoir.network)
+    if using_observed_outflow(reservoir, config)
+        @debug log_message_observed_outflow(reservoir)
+    end
+    # update overland and river flow
+    update_overland_flow_model!(overland_flow, river_flow, domain, clock, dt)
+
+    return nothing
+end

@@ -12,11 +12,6 @@ const PCR_DIR = [
     CartesianIndex(1, 1),  # 9
 ]
 
-const MISSING_VALUE = Float64(NaN)
-
-# timestep that the parameter units are defined in
-const BASETIMESTEP = Second(Day(1))
-
 """
     scurve(x, a, b, c)
 
@@ -24,26 +19,49 @@ Sigmoid "S"-shaped curve.
 
 # Arguments
 - `x::Real`: input
-- `a::Real`: determines the centre level
-- `b::Real`: determines the amplitude of the curve
+- `a::Real`: determines the center level
+- `b::Real`: determines the amplitude of the curve (range: (0, b⁻¹))
 - `c::Real`: determines the steepness or "stepwiseness" of the curve.
              The higher c the sharper the function. A negative c reverses the function.
 """
-function scurve(x, a, b, c)
-    s = one(x) / (b + exp(-c * (x - a)))
+function scurve(x::Real, a::Real, b::Real, c::Real)::Real
+    s = inv(b + exp(-c * (x - a)))
     return s
 end
 
+function to_enumx(T, i::Int)
+    options = instances(T)
+    n_options = length(options)
+    if 1 ≤ i ≤ n_options
+        return options[i]
+    else
+        options_repr = repr(MIME("text/plain"), T)
+        throw(
+            error(
+                "Cannot convert $i to $T, there are only $n_options options:\n$options_repr.",
+            ),
+        )
+    end
+end
+
 "Set at indices pit values (default = 5) in a gridded local drainage direction vector"
-function set_pit_ldd(pits_2d, ldd, indices; pit = 5)
+function set_pit_ldd(
+    pits_2d::AbstractMatrix{Bool},
+    ldd::Vector{UInt8},
+    indices::Vector{CartesianIndex{2}};
+    pit::Integer = 5,
+)::Vector{UInt8}
     pits = pits_2d[indices]
     index = filter(i -> isequal(pits[i], true), 1:length(indices))
-    ldd[index] .= pit
+    ldd[index] .= UInt8(pit)
     return ldd
 end
 
 "Filter upstream neighbors of graph based on logical vector"
-function filter_upsteam_nodes(graph, vec_logical::Vector{Bool})
+function filter_upstream_nodes(
+    graph::SimpleDiGraph{Int},
+    vec_logical::Vector{Bool},
+)::Vector{Vector{Int}}
     upstream_nodes = Vector{Int}[]
     for v in topological_sort_by_dfs(graph)
         ups_nodes = inneighbors(graph, v)
@@ -64,7 +82,10 @@ These map from the 1D internal domain to the 2D external domain.
 the 1D internal domain, providing an Int which can be used as a linear index. Values of 0
 represent inactive cells.
 """
-function active_indices(subcatch_2d::AbstractMatrix, nodata)
+function active_indices(
+    subcatch_2d::AbstractMatrix,
+    nodata,
+)::Tuple{Vector{CartesianIndex{2}}, Matrix{Int}}
     A = subcatch_2d
     all_inds = CartesianIndices(size(A))
     indices = filter(i -> !isequal(A[i], nodata), all_inds)
@@ -77,19 +98,20 @@ function active_indices(subcatch_2d::AbstractMatrix, nodata)
     return indices, reverse_indices
 end
 
-function active_indices(domain::Domain, key::AbstractString)
-    if occursin("reservoir", key)
+"Get active indices of `key` (standard name or model path) by prefix string matching."
+function active_indices(domain::Domain, key::AbstractString)::Vector{CartesianIndex{2}}
+    if startswith(key, domain_parameter_map["reservoir"])
         return domain.reservoir.network.indices_outlet
-    elseif occursin("river", key) || occursin("floodplain", key)
+    elseif startswith(key, domain_parameter_map["river"])
         return domain.river.network.indices
-    elseif occursin("drain", key)
+    elseif startswith(key, domain_parameter_map["drain"])
         return domain.drain.network.indices
     else
         return domain.land.network.indices
     end
 end
 
-function lattometres(lat::Real)
+function lattometres(lat::Real)::Tuple{Float64, Float64}
     m1 = 111132.92     # latitude calculation term 1
     m2 = -559.82       # latitude calculation term 2
     m3 = 1.175         # latitude calculation term 3
@@ -105,7 +127,11 @@ function lattometres(lat::Real)
     return longlen, latlen
 end
 
-function cell_lengths(y::AbstractVector, celllength::Real, cell_length_in_meter::Bool)
+function cell_lengths(
+    y::AbstractVector{<:Real},
+    celllength::Real,
+    cell_length_in_meter::Bool,
+)::Tuple{Vector{Float64}, Vector{Float64}}
     n = length(y)
     xl = fill(MISSING_VALUE, n)
     yl = fill(MISSING_VALUE, n)
@@ -132,8 +158,9 @@ and set states in `model` object. Active cells are selected with the correspondi
 # Arguments
 - `type = nothing`: type to convert data to after reading. By default no conversion is done.
 """
-function set_states!(instate_path, model; type = nothing, dimname = nothing)
-    (; domain, land, config) = model
+function set_states!(instate_path::AbstractString, model; dimname = nothing)::Nothing
+    (; domain, config, clock, land) = model
+    dt_val = tosecond(clock.dt)
 
     # Check if required states are covered
     state_ncnames = check_states(config)
@@ -141,8 +168,10 @@ function set_states!(instate_path, model; type = nothing, dimname = nothing)
     # states in netCDF include dim time (one value) at index 3 or 4, 3 or 4 dims are allowed
     NCDataset(instate_path) do ds
         for (state, ncname) in state_ncnames
+            metadata = get_metadata(state; model)
+            (; unit) = metadata
             @info "Setting initial state from netCDF." ncpath = instate_path ncvarname =
-                ncname state
+                ncname state unit
             sel = active_indices(domain, state)
             n = length(sel)
             dims = length(dimnames(ds[ncname]))
@@ -155,33 +184,22 @@ function set_states!(instate_path, model; type = nothing, dimname = nothing)
                 end
                 A = read_standardized(ds, ncname, dimensions)
                 A = permutedims(A[sel, :])
-                # note that this array is allowed to have missings, since not every land
-                # column is `maxlayers` layers deep
+                # note that this array is allowed to have missing, since not every land
+                # column is `maximum_number_of_layers` layers deep
                 if dimname == :layer
                     A = replace!(A, missing => NaN)
                 end
-                # Convert to desired type if needed
-                if !isnothing(type)
-                    if eltype(A) != type
-                        A = map(type, A)
-                    end
-                end
+                A = apply_unit_and_type_transform!(A, metadata; dt_val)
                 # set state in model object
-                lens = standard_name_map(land)[state].lens
-                lens(model) .= svectorscopy(A, Val{size(A)[1]}())
+                metadata.lens(model) .= svectorscopy(A, Val{size(A)[1]}())
                 # 3 dims (x,y,time)
             elseif dims == 3
                 A = read_standardized(ds, ncname, (x = :, y = :, time = 1))
                 A = A[sel]
                 A = nomissing(A)
-                # Convert to desired type if needed
-                if !isnothing(type)
-                    if eltype(A) != type
-                        A = map(type, A)
-                    end
-                end
+                A = apply_unit_and_type_transform!(A, metadata; dt_val)
                 # set state in model object, only set active cells ([1:n]) (ignore boundary conditions/ghost points)
-                lens = standard_name_map(land)[state].lens
+                lens = get_metadata(state, typeof(land), Routing; model).lens
                 lens(model)[1:n] .= A
             else
                 error(
@@ -194,58 +212,89 @@ function set_states!(instate_path, model; type = nothing, dimname = nothing)
     return nothing
 end
 
+function get_var(config::Config, parameter::AbstractString; optional = true)
+    if hasfield(InputSection, Symbol(parameter))
+        var = getfield(config.input, Symbol(parameter))
+    elseif haskey(config.input._location_maps, parameter)
+        var = config.input._location_maps[parameter]
+    elseif haskey(config.input.static, parameter)
+        var = config.input.static[parameter]
+    elseif haskey(config.input.cyclic, parameter)
+        var = config.input.cyclic[parameter]
+    elseif optional
+        var = nothing
+    else
+        error(
+            "Required input model parameter with standard name '$parameter' not set in TOML file",
+        )
+    end
+    return var
+end
+
 """
-    ncread(nc, config::Config, parameter::NamedTuple; <keyword arguments>)
+Apply the affine transform in `var` to the incoming array `A` in place element-wise.
+The affine transform consists of a scaling by `scale` and a translation by `offset`.
+These operations are only applied when non-trivial.
+"""
+function apply_affine_transform!(A::AbstractArray, var::InputEntry)
+    (; _do_scaling, _scale_scalar, scale, _do_offsetting, _offset_scalar, offset) = var
+    if _do_scaling
+        if _scale_scalar
+            A .*= only(scale)
+        else
+            A .*= scale
+        end
+    end
+    if _do_offsetting
+        if _offset_scalar
+            A .+= only(offset)
+        else
+            A .+= offset
+        end
+    end
+    return A
+end
+
+"""
+    ncread(nc, config::Config, parameter::AbstractString, model_type; <keyword arguments>)
 
 Read a netCDF variable `var` from file `nc`, based on `config` (parsed TOML file) and the
-`parameter` specifying the internal standard `name` in the TOML configuration file and a
-`lens` to access the external netCDF variable name in the nested `config` object. Supports
-various keyword arguments to get selections of data in desired types, with or without
-missing values.
+model `parameter` (standard name) specified in the TOML configuration file. Supports various
+keyword arguments to get selections of data in desired types, with or without missing
+values.
 
 # Arguments
+- `model_type`: The model type (e.g., LandHydrologySBM, SoilLoss, Domain, Routing) used to
+        determine the appropriate standard name mapping.
 - `sel=nothing`: A selection of indices, such as a `Vector{CartesianIndex}` of active cells,
         to return from the netCDF. By default all cells are returned.
-- `defaults=nothing`: A default value if `var` is not in `nc`. By default it gives an error
-    in this case.
-- `type=nothing`: Type to convert data to after reading. By default no conversion is done.
-- `allow_missing=false`: Missing values within `sel` is not allowed by default. Set to
-        `true` to allow missing values.
-- `fill=nothing`: Missing values are replaced by this fill value if `allow_missing` is
-  `false`.
-- `dimname`: Name of third dimension of parameter `var`. By default no third dimension is
-  expected.
-- `logging`: Generate a logging message when reading a netCDF variable. By default `true`.
+- `logging=true`: Generate a logging message when reading a netCDF variable.
+- `metadata`: The metadata of the read parameter or state, obtained from the parameter name by default.
 """
 function ncread(
     nc,
     config::Config,
-    parameter::NamedTuple;
+    parameter::AbstractString,
+    model_type;
     sel = nothing,
-    defaults = nothing,
-    type = nothing,
-    allow_missing = false,
-    fill = nothing,
-    dimname = nothing,
     logging = true,
+    metadata = get_metadata(parameter, model_type),
 )
-    # for optional parameters (`lens` set to `nothing`) default values are used.
-    if isnothing(parameter.lens)
-        @info "Set `$(parameter.name)` using default value `$defaults`."
-        @assert !isnothing(defaults)
-        if !isnothing(type)
-            defaults = convert(type, defaults)
-        end
+    (; default, fill, type, allow_missing, dimname) = metadata
+    var = get_var(config, parameter; optional = !isnothing(default))
+    dt_val = config.time.timestepsecs
+    (; unit) = metadata
+
+    # for optional parameters default values are used.
+    if isnothing(var)
+        @info "Set `$parameter [$unit]` using default value `$default $unit`."
+        @assert !isnothing(default) "Default value required but not available for $parameter (if you see this as a user please open an issue)."
+        default = unit_and_type_transform(default, metadata; dt_val)
         if isnothing(dimname)
-            return Base.fill(defaults, length(sel))
+            return Base.fill(default, length(sel))
         else
-            return Base.fill(defaults, (nc.dim[String(dimname)], length(sel)))
+            return Base.fill(default, (nc.dim[String(dimname)], length(sel)))
         end
-    else
-        # get var (netCDF variable or type Config) from TOML file.
-        # if var has type Config, input parameters can be changed.
-        var = parameter.lens(config)
-        var = var isa AbstractDict ? Config(var, pathof(config)) : var
     end
 
     # dim `time` is also included in `dim_sel`: this allows for cyclic parameters (read
@@ -260,43 +309,45 @@ function ncread(
         error("Unrecognized dimension name $dimname")
     end
 
-    # If var has type Config, input parameters can be changed (through scale, offset and
-    # input netCDF var) or set to a uniform value (providing a value). Otherwise, input
-    # NetCDF var is read directly.
-    var, mod = ncvar_name_modifier(var; config = config)
+    if var isa Number
+        var = InputEntry(; value = var)
+    elseif var isa String
+        var = InputEntry(; external_name = var)
+    else
+        @assert var isa InputEntry
+    end
 
-    if !isnothing(mod.value)
-        @info "Set `$(parameter.name)` using uniform value `$(mod.value)` from TOML file."
-        if isnothing(dimname)
+    (; value, layer, scale, offset) = var
+    variable_info(var)
+
+    if !isnothing(value)
+        @info "Set `$parameter [$unit]` using uniform value `$value $unit` from TOML file."
+        A = if isnothing(dimname)
             # set to one uniform value
-            return Base.fill(mod.value, length(sel))
-        elseif length(mod.value) == 1
+            Base.fill(only(value), length(sel))
+        elseif length(value) == 1
             # set to one uniform value (parameter with third dimension of size 1)
-            return Base.fill(mod.value, (nc.dim[String(dimname)], length(sel)))
-        elseif length(mod.value) > 1
+            Base.fill(only(value), (nc.dim[String(dimname)], length(sel)))
+        elseif length(value) > 1
             # set to multiple uniform values (parameter with third dimension of size > 1)
-            @assert length(mod.value) == nc.dim[String(dimname)]
-            return repeat(mod.value, 1, length(sel))
+            @assert length(value) == nc.dim[String(dimname)]
+            repeat(value, 1, length(sel))
         end
+        return apply_unit_and_type_transform!(A, metadata; dt_val)
     else
         if logging
-            @info "Set `$(parameter.name)` using netCDF variable `$var`."
+            @info "Set `$parameter [$unit]` using netCDF variable `$var`."
         end
-        A = read_standardized(nc, var, dim_sel)
-        if !isnothing(mod.index)
+        A = read_standardized(nc, variable_name(var), dim_sel)
+        if !isnothing(layer)
             # the modifier index is only set in combination with scale and offset for SVectors,
             # provided through the TOML file.
-            if length(mod.index) > 1
-                # if index, scale and offset is provided in the TOML as a list.
-                for i in 1:length(mod.index)
-                    A[:, :, mod.index[i]] =
-                        A[:, :, mod.index[i]] .* mod.scale[i] .+ mod.offset[i]
-                end
-            else
-                A[:, :, mod.index] = A[:, :, mod.index] .* mod.scale .+ mod.offset
+            # if index, scale and offset is provided in the TOML as a list.
+            for i in eachindex(layer)
+                A[:, :, layer[i]] = A[:, :, layer[i]] .* scale[i] .+ offset[i]
             end
-        elseif mod.scale != 1.0 || mod.offset != 0.0
-            A = A .* mod.scale .+ mod.offset
+        else
+            apply_affine_transform!(A, var)
         end
     end
 
@@ -309,68 +360,24 @@ function ncread(
         end
     end
 
-    if !allow_missing
+    if allow_missing
+        # Convert to desired type if needed
+        A = map(x -> ismissing(x) ? x : type(x), A)
+    else
         if isnothing(fill)
-            # errors if missings are found
+            # errors if missing are found
             A = nomissing(A)
             if any(isnan, A)
                 error("NaN not allowed in $var")
             end
         else
-            # replaces missings with a fill value
+            # replaces missing with a fill value
             A = nomissing(A, fill)
             # replace also NaN values with the fill value
             replace!(x -> isnan(x) ? fill : x, A)
         end
     end
-
-    # Convert to desired type if needed
-    if !isnothing(type)
-        if eltype(A) != type
-            A = convert(Array{type}, A)
-        end
-    end
-
-    return A
-end
-
-"""
-Return `NamedTuple` with internal standard `name` and a `lens` to access the external static
-or cyclic input model parameter name in the nested `config` object (parsed TOML file). By
-default specifying a model parameter is `optional` in the TOML file.
-"""
-function lens_input_parameter(config::Config, p::AbstractString; optional = true)
-    do_cyclic = haskey(config.input, "cyclic")
-    if haskey(config.input.static, p)
-        return (name = p, lens = @optic(_.input.static[p]))
-    elseif do_cyclic && haskey(config.input.cyclic, p)
-        return (name = p, lens = @optic(_.input.cyclic[p]))
-    elseif optional
-        return (name = p, lens = nothing)
-    else
-        error(
-            """Required input static or cyclic model parameter with standard name $p not set 
-            in TOML file (below `[input.static]` or `[input.cyclic]` section)""",
-        )
-    end
-end
-
-"""
-Return `NamedTuple` with internal standard `name` and a `lens` to access the external input
-(not directly part of a model) parameter name in the nested `config` object (parsed TOML
-file). By default specifying a model parameter is `optional` in the TOML file.
-"""
-function lens_input(config::Config, p::AbstractString; optional = true)
-    if haskey(config.input, p)
-        return (name = p, lens = @optic(_.input[p]))
-    elseif optional
-        return (name = p, lens = nothing)
-    else
-        error(
-            """Required input model parameter with standard name $p not set in TOML file 
-            (below `[input]` section)""",
-        )
-    end
+    return apply_unit_and_type_transform!(A, metadata; dt_val)
 end
 
 """
@@ -380,7 +387,11 @@ Calculate actual soil thickness of layers based on a reference depth (e.g. soil 
 water table depth) `reference_depth`, a SVector `cum_depth` with cumulative soil depth starting
 at soil surface (0), and a SVector `thickness` with thickness per soil layer.
 """
-function set_layerthickness(reference_depth::Real, cum_depth::SVector, thickness::SVector)
+function set_layerthickness(
+    reference_depth::Real,
+    cum_depth::SVector,
+    thickness::SVector{N, Float64},
+)::SVector{N, Float64} where {N}
     thicknesslayers = thickness .* MISSING_VALUE
     for i in 1:length(thicknesslayers)
         if reference_depth > cum_depth[i + 1]
@@ -392,9 +403,9 @@ function set_layerthickness(reference_depth::Real, cum_depth::SVector, thickness
     return thicknesslayers
 end
 
-function number_of_active_layers(thickness::SVector)
-    nlayers = length(thickness) - sum(isnan.(thickness))
-    return nlayers
+function number_of_active_layers(thickness::SVector)::Int
+    number_of_layers = length(thickness) - sum(isnan.(thickness))
+    return number_of_layers
 end
 
 """
@@ -404,7 +415,7 @@ Return the flow length for a non square grid. Input `ldd` (drainage network), `x
 (length of cells in x direction), `y_length` (length of cells in y direction). Output is
 flow length.
 """
-function get_flow_length(ldd, x_length, y_length)
+function get_flow_length(ldd::UInt8, x_length::Real, y_length::Real)::Real
     # take into account non-square cells
     # if ldd is 8 or 2 use y_length
     # if ldd is 4 or 6 use x_length
@@ -424,7 +435,7 @@ Return the flow width for a non square grid. Input `ldd` (drainage network), `x_
 (length of cells in x direction), `y_length` (length of cells in y direction). Output is
 flow width.
 """
-function get_flow_width(ldd, x_length, y_length)
+function get_flow_width(ldd::UInt8, x_length::Real, y_length::Real)::Real
     # take into account non-square cells
     # if ldd is 8 or 2 use x_length
     # if ldd is 4 or 6 use y_length
@@ -444,35 +455,29 @@ Return the surface flow width. Input `flow_width` (flow width), `flow_length` (f
 `land_area` (area covered by land (excluding river coverage)) and `river_location` (river
 cell, boolean). Output is surface flow width `surface_width`.
 """
-function get_surface_width(flow_width, flow_length, land_area, river_location)
+function get_surface_width(
+    flow_width::Real,
+    flow_length::Real,
+    land_area::Real,
+    river_location::Bool,
+)::Real
     surface_width = river_location ? land_area / flow_length : flow_width
     return surface_width
 end
 
 # 2.5x faster power method
 "Faster method for exponentiation"
-pow(x, y) = exp(y * log(x))
+pow(x::Real, y::Real)::Real = exp(y * log(x))
 
-"Return the sum of the array `A` at indices `inds`"
-function sum_at(A, inds)
-    v = zero(eltype(A))
-    for i in inds
-        v += A[i]
-    end
-    return v
+function sum_at(A::AbstractVector{T}, inds::AbstractVector{Int})::T where {T}
+    mapreduce(i -> A[i], +, inds; init = zero(T))
 end
 
-"Return the sum of the function `f` at indices `inds`"
-function sum_at(f::Function, inds, T)
-    v = zero(T)
-    for i in inds
-        v += f(i)
-    end
-    return v
-end
+sum_at(f::Function, inds::AbstractVector{Int}; T::Type{<:Number} = Float64) =
+    mapreduce(f, +, inds; init = zero(T))
 
 # https://juliaarrays.github.io/StaticArrays.jl/latest/pages/api/#Arrays-of-static-arrays-1
-function svectorscopy(x::Matrix{T}, ::Val{N}) where {T, N}
+function svectorscopy(x::Matrix{T}, ::Val{N})::Vector{SVector{N, T}} where {T, N}
     size(x, 1) == N || error("sizes mismatch")
     isbitstype(T) || error("use for bitstypes only")
     return copy(reinterpret(SVector{N, T}, vec(x)))
@@ -485,7 +490,12 @@ Return flow `fraction` to a river cell (at index `j`) based on the ratio of the 
 `slope` at index `j` to the sum of the land surface `slope` at index `j` and at river cell
 index `i`.
 """
-function get_flow_fraction_to_river(graph, ldd, inds_river, slope)
+function get_flow_fraction_to_river(
+    graph::SimpleDiGraph{Int},
+    ldd::Vector{UInt8},
+    inds_river::Vector{Int},
+    slope::Vector{<:Real},
+)::Vector{Float64}
     n = length(slope)
     fraction = zeros(n)
     for i in inds_river
@@ -508,7 +518,7 @@ Used in the structs of arrays to ensure all vectors are of equal length.
 `equal_size_vectors(([4,5], [4,5]))` would pass.
 `equal_size_vectors((1, [4,5], [4,5]))` would also pass, since `1` is not an AbstractVector.
 """
-function equal_size_vectors(x)
+function equal_size_vectors(x::Tuple)
     # all vectors in this struct should be the same size
     inds_vec = findall(arg -> isa(arg, AbstractVector), x)
     n = length(x[inds_vec[1]])
@@ -544,7 +554,9 @@ tosecond(x::T) where {T <: TimePeriod} = x / convert(T, Second(1))
 
 Return the source node `src` and destination node `dst` of each edge of a directed `graph`.
 """
-function adjacent_nodes_at_edge(graph)
+function adjacent_nodes_at_edge(
+    graph::SimpleDiGraph{Int},
+)::NamedTuple{(:src, :dst), Tuple{Vector{Int}, Vector{Int}}}
     _edges = collect(edges(graph))
     return (src = src.(_edges), dst = dst.(_edges))
 end
@@ -554,7 +566,10 @@ end
 
 Return the source edge `src` and destination edge `dst` of each node of a directed `graph`.
 """
-function adjacent_edges_at_node(graph, nodes_at_edge)
+function adjacent_edges_at_node(
+    graph::SimpleDiGraph{Int},
+    nodes_at_edge,
+)::NamedTuple{(:src, :dst), Tuple{Vector{Vector{Int}}, Vector{Vector{Int}}}}
     nodes = vertices(graph)
     src_edge = Vector{Int}[]
     dst_edge = copy(src_edge)
@@ -566,7 +581,7 @@ function adjacent_edges_at_node(graph, nodes_at_edge)
 end
 
 "Add `vertex` and `edge` to `pits` of a directed `graph`"
-function add_vertex_edge_graph!(graph, pits)
+function add_vertex_edge_graph!(graph::SimpleDiGraph{Int}, pits::Vector{Int})::Nothing
     n = nv(graph)
     for (i, v) in enumerate(pits)
         add_vertex!(graph)
@@ -590,13 +605,13 @@ function set_effective_flowwidth!(
     we_x::Vector{Float64},
     we_y::Vector{Float64},
     domain::Domain,
-)
+)::Nothing
     (; local_drain_direction, indices) = domain.river.network
     (; edge_indices, reverse_indices) = domain.land.network
     (; flow_width, reservoir_outlet) = domain.river.parameters
     reverse_indices = reverse_indices[indices]
 
-    graph = flowgraph(local_drain_direction, indices, PCR_DIR)
+    graph, local_drain_direction = flowgraph(local_drain_direction, indices, PCR_DIR)
     toposort = topological_sort_by_dfs(graph)
     n = length(we_x)
     for v in toposort
@@ -610,42 +625,44 @@ function set_effective_flowwidth!(
             we_x[idx] = reservoir_outlet[v] ? 0.0 : max(we_x[idx] - 0.5 * w, 0.0)
             we_y[idx] = reservoir_outlet[v] ? 0.0 : max(we_y[idx] - 0.5 * w, 0.0)
         elseif dir == CartesianIndex(-1, -1)
-            if edge_indices.xd[idx] <= n
-                we_y[edge_indices.xd[idx]] =
+            if edge_indices.ind_x_down[idx] <= n
+                we_y[edge_indices.ind_x_down[idx]] =
                     reservoir_outlet[v] ? 0.0 :
-                    max(we_y[edge_indices.xd[idx]] - 0.5 * w, 0.0)
+                    max(we_y[edge_indices.ind_x_down[idx]] - 0.5 * w, 0.0)
             end
-            if edge_indices.yd[idx] <= n
-                we_x[edge_indices.yd[idx]] =
+            if edge_indices.ind_y_down[idx] <= n
+                we_x[edge_indices.ind_y_down[idx]] =
                     reservoir_outlet[v] ? 0.0 :
-                    max(we_x[edge_indices.yd[idx]] - 0.5 * w, 0.0)
+                    max(we_x[edge_indices.ind_y_down[idx]] - 0.5 * w, 0.0)
             end
         elseif dir == CartesianIndex(1, 0)
             we_y[idx] = reservoir_outlet[v] ? 0.0 : max(we_y[idx] - w, 0.0)
         elseif dir == CartesianIndex(0, 1)
             we_x[idx] = reservoir_outlet[v] ? 0.0 : max(we_x[idx] - w, 0.0)
         elseif dir == CartesianIndex(-1, 0)
-            if edge_indices.xd[idx] <= n
-                we_y[edge_indices.xd[idx]] =
-                    reservoir_outlet[v] ? 0.0 : max(we_y[edge_indices.xd[idx]] - w, 0.0)
+            if edge_indices.ind_x_down[idx] <= n
+                we_y[edge_indices.ind_x_down[idx]] =
+                    reservoir_outlet[v] ? 0.0 :
+                    max(we_y[edge_indices.ind_x_down[idx]] - w, 0.0)
             end
         elseif dir == CartesianIndex(0, -1)
-            if edge_indices.yd[idx] <= n
-                we_x[edge_indices.yd[idx]] =
-                    reservoir_outlet[v] ? 0.0 : max(we_x[edge_indices.yd[idx]] - w, 0.0)
+            if edge_indices.ind_y_down[idx] <= n
+                we_x[edge_indices.ind_y_down[idx]] =
+                    reservoir_outlet[v] ? 0.0 :
+                    max(we_x[edge_indices.ind_y_down[idx]] - w, 0.0)
             end
         elseif dir == CartesianIndex(1, -1)
             we_y[idx] = max(we_y[idx] - 0.5 * w, 0.0)
-            if edge_indices.yd[idx] <= n
-                we_x[edge_indices.yd[idx]] =
+            if edge_indices.ind_y_down[idx] <= n
+                we_x[edge_indices.ind_y_down[idx]] =
                     reservoir_outlet[v] ? 0.0 :
-                    max(we_x[edge_indices.yd[idx]] - 0.5 * w, 0.0)
+                    max(we_x[edge_indices.ind_y_down[idx]] - 0.5 * w, 0.0)
             end
         elseif dir == CartesianIndex(-1, 1)
-            if edge_indices.xd[idx] <= n
-                we_y[edge_indices.xd[idx]] =
+            if edge_indices.ind_x_down[idx] <= n
+                we_y[edge_indices.ind_x_down[idx]] =
                     reservoir_outlet[v] ? 0.0 :
-                    max(we_y[edge_indices.xd[idx]] - 0.5 * w, 0.0)
+                    max(we_y[edge_indices.ind_x_down[idx]] - 0.5 * w, 0.0)
             end
             we_x[idx] = reservoir_outlet[v] ? 0.0 : max(we_x[idx] - 0.5 * w, 0.0)
         end
@@ -654,7 +671,7 @@ function set_effective_flowwidth!(
 end
 
 "Return julian day of year (leap days are not counted)"
-function julian_day(time)
+function julian_day(time::TimeType)::Int
     # for all years February 28 is day 59 and March 1 is day 60.
     day = dayofyear(time) - (isleapyear(time) && dayofyear(time) > 60)
     return day
@@ -673,7 +690,7 @@ Run function `f` in parallel by spawning tasks (nthreads <= 8), each task iterat
 chunk of size `basesize`. For nthreads > 8 run function `f` in parallel with
 `Polyester@batch` with `minbatch` equal to `basesize`.
 """
-function threaded_foreach(f, x::AbstractArray; basesize::Integer)
+function threaded_foreach(f::Function, x::AbstractArray; basesize::Integer)::Nothing
     if Threads.nthreads() <= 8
         len = length(x)
         partitions = _partition(len, basesize)
@@ -699,143 +716,184 @@ function threaded_foreach(f, x::AbstractArray; basesize::Integer)
 end
 
 """
-    hydraulic_conductivity_at_depth(p::KvExponential, kvfrac, z, i, n)
-    hydraulic_conductivity_at_depth(p::KvExponentialConstant, kvfrac, z, i, n)
-    hydraulic_conductivity_at_depth(p::KvLayered, kvfrac, z, i, n)
-    hydraulic_conductivity_at_depth(p::KvLayeredExponential, kvfrac, z, i, n)
+    hydraulic_conductivity_at_depth(p::KvExponential, vertical_hydraulic_conductivity_factor, z, i, n)
+    hydraulic_conductivity_at_depth(p::KvExponentialConstant, vertical_hydraulic_conductivity_factor, z, i, n)
+    hydraulic_conductivity_at_depth(p::KvLayered, vertical_hydraulic_conductivity_factor, z, i, n)
+    hydraulic_conductivity_at_depth(p::KvLayeredExponential, vertical_hydraulic_conductivity_factor, z, i, n)
 
-Return vertical hydraulic conductivity `kv_z` at depth `z` for index `i` using muliplication
+Return vertical hydraulic conductivity `kv_z` at depth `z` for index `i` using multiplication
 factor `kv_frac` at soil layer `n` and vertical hydraulic conductivity profile `p`.
 """
-function hydraulic_conductivity_at_depth(p::KvExponential, kvfrac, z, i, n)
-    kv_z = kvfrac[i][n] * p.kv_0[i] * exp(-p.f[i] * z)
+function hydraulic_conductivity_at_depth(
+    p::KvExponential,
+    vertical_hydraulic_conductivity_factor,
+    z,
+    i,
+    n,
+)
+    kv_z =
+        vertical_hydraulic_conductivity_factor[i][n] *
+        p.kv_0[i] *
+        exp(-p.hydraulic_conductivity_scale_parameter[i] * z)
     return kv_z
 end
 
-function hydraulic_conductivity_at_depth(p::KvExponentialConstant, kvfrac, z, i, n)
-    (; kv_0, f) = p.exponential
+function hydraulic_conductivity_at_depth(
+    p::KvExponentialConstant,
+    vertical_hydraulic_conductivity_factor,
+    z,
+    i,
+    n,
+)
+    (; kv_0, hydraulic_conductivity_scale_parameter) = p.exponential
     if z < p.z_exp[i]
-        kv_z = kvfrac[i][n] * kv_0[i] * exp(-f[i] * z)
+        kv_z =
+            vertical_hydraulic_conductivity_factor[i][n] *
+            kv_0[i] *
+            exp(-hydraulic_conductivity_scale_parameter[i] * z)
     else
-        kv_z = kvfrac[i][n] * kv_0[i] * exp(-f[i] * p.z_exp[i])
+        kv_z =
+            vertical_hydraulic_conductivity_factor[i][n] *
+            kv_0[i] *
+            exp(-hydraulic_conductivity_scale_parameter[i] * p.z_exp[i])
     end
     return kv_z
 end
 
-function hydraulic_conductivity_at_depth(p::KvLayered, kvfrac, z, i, n)
-    kv_z = kvfrac[i][n] * p.kv[i][n]
+function hydraulic_conductivity_at_depth(
+    p::KvLayered,
+    vertical_hydraulic_conductivity_factor,
+    z,
+    i,
+    n,
+)
+    kv_z = vertical_hydraulic_conductivity_factor[i][n] * p.kv[i][n]
     return kv_z
 end
 
-function hydraulic_conductivity_at_depth(p::KvLayeredExponential, kvfrac, z, i, n)
+function hydraulic_conductivity_at_depth(
+    p::KvLayeredExponential,
+    vertical_hydraulic_conductivity_factor,
+    z,
+    i,
+    n,
+)
     return if z < p.z_layered[i]
-        kvfrac[i][n] * p.kv[i][n]
+        vertical_hydraulic_conductivity_factor[i][n] * p.kv[i][n]
     else
         n = p.nlayers_kv[i]
-        kvfrac[i][n] * p.kv[i][n] * exp(-p.f[i] * (z - p.z_layered[i]))
+        vertical_hydraulic_conductivity_factor[i][n] *
+        p.kv[i][n] *
+        exp(-p.hydraulic_conductivity_scale_parameter[i] * (z - p.z_layered[i]))
     end
 end
 
 """
-    kh_layered_profile!(soil::SbmSoilModel, subsurface::LateralSSF, kv_profile::KvLayered, dt)
-    kh_layered_profile!(soil::SbmSoilModel, subsurface::LateralSSF, kv_profile::KvLayeredExponential, dt)
+    kh_layered_profile!(soil_model::SbmSoilModel, subsurface_flow_model::LateralSSFModel, kv_profile::KvLayered, dt)
+    kh_layered_profile!(soil_model::SbmSoilModel, subsurface_flow_model::LateralSSFModel, kv_profile::KvLayeredExponential, dt)
 
 Compute equivalent horizontal hydraulic conductivity `kh` [m d⁻¹] using vertical hydraulic
 conductivity profile `kv_profile`.
 """
 function kh_layered_profile!(
-    soil::SbmSoilModel,
-    subsurface::LateralSSF,
+    soil_model::SbmSoilModel,
+    subsurface_flow_model::LateralSSFModel,
     kv_profile::KvLayered,
-    dt,
 )
-    (; nlayers, sumlayers, act_thickl, soilthickness) = soil.parameters
-    (; n_unsatlayers, zi) = soil.variables
-    (; kh) = subsurface.parameters.kh_profile
-    (; khfrac) = subsurface.parameters
+    (; number_of_layers, cumulative_layer_depth, actual_layer_thickness, soil_thickness) =
+        soil_model.parameters
+    (; n_unsatlayers, water_table_depth) = soil_model.variables
+    (; kh) = subsurface_flow_model.parameters.kh_profile
+    (; horizontal_to_vertical_hydraulic_conductivity_ratio) =
+        subsurface_flow_model.parameters
 
-    t_factor = (tosecond(BASETIMESTEP) / dt)
     for i in eachindex(kh)
-        m = nlayers[i]
+        m = number_of_layers[i]
 
-        if soilthickness[i] > zi[i]
+        if soil_thickness[i] > water_table_depth[i]
             transmissivity = 0.0
-            _sumlayers = @view sumlayers[i][2:end]
+            _sumlayers = @view cumulative_layer_depth[i][2:end]
             n = max(n_unsatlayers[i], 1)
-            transmissivity += (_sumlayers[n] - zi[i]) * kv_profile.kv[i][n]
+            transmissivity += (_sumlayers[n] - water_table_depth[i]) * kv_profile.kv[i][n]
             n += 1
             while n <= m
-                transmissivity += act_thickl[i][n] * kv_profile.kv[i][n]
+                transmissivity += actual_layer_thickness[i][n] * kv_profile.kv[i][n]
                 n += 1
             end
-            # convert units for kh [m d⁻¹] computation (transmissivity [mm² Δt⁻¹], soilthickness
-            # [mm] and zi [mm])
             kh[i] =
-                0.001 * (transmissivity / (soilthickness[i] - zi[i])) * t_factor * khfrac[i]
+                (transmissivity / (soil_thickness[i] - water_table_depth[i])) *
+                horizontal_to_vertical_hydraulic_conductivity_ratio[i]
         else
-            kh[i] = 0.001 * kv_profile.kv[i][m] * t_factor * khfrac[i]
+            kh[i] =
+                kv_profile.kv[i][m] * horizontal_to_vertical_hydraulic_conductivity_ratio[i]
         end
     end
     return nothing
 end
 
 function kh_layered_profile!(
-    soil::SbmSoilModel,
-    subsurface::LateralSSF,
+    soil_model::SbmSoilModel,
+    subsurface_flow_model::LateralSSFModel,
     kv_profile::KvLayeredExponential,
-    dt,
 )
-    (; nlayers, sumlayers, act_thickl, soilthickness) = soil.parameters
-    (; nlayers_kv, z_layered, kv, f) = kv_profile
-    (; n_unsatlayers, zi) = soil.variables
-    (; kh) = subsurface.parameters.kh_profile
-    (; khfrac) = subsurface.parameters
-    t_factor = (tosecond(BASETIMESTEP) / dt)
+    (; number_of_layers, cumulative_layer_depth, actual_layer_thickness, soil_thickness) =
+        soil_model.parameters
+    (; nlayers_kv, z_layered, kv, hydraulic_conductivity_scale_parameter) = kv_profile
+    (; n_unsatlayers, water_table_depth) = soil_model.variables
+    (; kh) = subsurface_flow_model.parameters.kh_profile
+    (; horizontal_to_vertical_hydraulic_conductivity_ratio) =
+        subsurface_flow_model.parameters
 
     for i in eachindex(kh)
-        m = nlayers[i]
+        m = number_of_layers[i]
 
-        if soilthickness[i] > zi[i]
+        if soil_thickness[i] > water_table_depth[i]
             transmissivity = 0.0
             n = max(n_unsatlayers[i], 1)
-            if zi[i] >= z_layered[i]
-                zt = soilthickness[i] - z_layered[i]
+            if water_table_depth[i] >= z_layered[i]
+                zt = soil_thickness[i] - z_layered[i]
                 j = nlayers_kv[i]
                 transmissivity +=
-                    kv[i][j] / f[i] *
-                    (exp(-f[i] * (zi[i] - z_layered[i])) - exp(-f[i] * zt))
+                    kv[i][j] / hydraulic_conductivity_scale_parameter[i] * (
+                        exp(
+                            -hydraulic_conductivity_scale_parameter[i] *
+                            (water_table_depth[i] - z_layered[i]),
+                        ) - exp(-hydraulic_conductivity_scale_parameter[i] * zt)
+                    )
                 n = m
             else
-                _sumlayers = @view sumlayers[i][2:end]
-                transmissivity += (_sumlayers[n] - zi[i]) * kv[i][n]
+                _sumlayers = @view cumulative_layer_depth[i][2:end]
+                transmissivity += (_sumlayers[n] - water_table_depth[i]) * kv[i][n]
             end
             n += 1
             while n <= m
                 if n > nlayers_kv[i]
-                    zt = soilthickness[i] - z_layered[i]
+                    zt = soil_thickness[i] - z_layered[i]
                     j = nlayers_kv[i]
-                    transmissivity += kv[i][j] / f[i] * (1.0 - exp(-f[i] * zt))
+                    transmissivity +=
+                        kv[i][j] / hydraulic_conductivity_scale_parameter[i] *
+                        (1.0 - exp(-hydraulic_conductivity_scale_parameter[i] * zt))
                     n = m
                 else
-                    transmissivity += act_thickl[i][n] * kv[i][n]
+                    transmissivity += actual_layer_thickness[i][n] * kv[i][n]
                 end
                 n += 1
             end
-            # convert units for kh [m d⁻¹] computation (transmissivity [mm² Δt⁻¹], soilthickness
-            # [mm] and zi [mm])
             kh[i] =
-                0.001 * (transmissivity / (soilthickness[i] - zi[i])) * t_factor * khfrac[i]
+                (transmissivity / (soil_thickness[i] - water_table_depth[i])) *
+                horizontal_to_vertical_hydraulic_conductivity_ratio[i]
         else
-            if zi[i] >= z_layered[i]
+            if water_table_depth[i] >= z_layered[i]
                 j = nlayers_kv[i]
                 kh[i] =
-                    0.001 *
                     kv[i][j] *
-                    exp(-f[i] * (zi[i] - z_layered[i])) *
-                    khfrac[i] *
-                    t_factor
+                    exp(
+                        -hydraulic_conductivity_scale_parameter[i] *
+                        (water_table_depth[i] - z_layered[i]),
+                    ) *
+                    horizontal_to_vertical_hydraulic_conductivity_ratio[i]
             else
-                kh[i] = 0.001 * kv[i][m] * t_factor * khfrac[i]
+                kh[i] = kv[i][m] * horizontal_to_vertical_hydraulic_conductivity_ratio[i]
             end
         end
     end
@@ -843,61 +901,77 @@ function kh_layered_profile!(
 end
 
 kh_layered_profile!(
-    soil::SbmSoilModel,
-    subsurface::LateralSSF,
+    soil_model::SbmSoilModel,
+    subsurface_flow_model::LateralSSFModel,
     kv_profile::Union{KvExponential, KvExponentialConstant},
-    dt,
 ) = nothing
 
 """
-    initialize_lateral_ssf!(subsurface::LateralSSF, parameters::LandParameters, kh_profile::KhExponential)
-    initialize_lateral_ssf!(subsurface::LateralSSF, parameters::LandParameters, kh_profile::KhExponentialConstant)
+    initialize_lateral_ssf_model!(subsurface_flow_model::LateralSSFModel, parameters::LandParameters, kh_profile::KhExponential)
+    initialize_lateral_ssf_model!(subsurface_flow_model::LateralSSFModel, parameters::LandParameters, kh_profile::KhExponentialConstant)
 
-Initialize lateral subsurface variables `ssf` and `ssfmax` using horizontal hydraulic
+Initialize lateral subsurface variables `q` and `q_max` using horizontal hydraulic
 conductivity profile `kh_profile`.
 """
-function initialize_lateral_ssf!(
-    subsurface::LateralSSF,
+function initialize_lateral_ssf_model!(
+    subsurface_flow_model::LateralSSFModel,
     parameters::LandParameters,
     kh_profile::KhExponential,
 )
-    (; kh_0, f) = kh_profile
-    (; ssf, ssfmax, zi) = subsurface.variables
-    (; soilthickness) = subsurface.parameters
+    (; kh_0, hydraulic_conductivity_scale_parameter) = kh_profile
+    (; q, q_max, water_table_depth) = subsurface_flow_model.variables
+    (; soil_thickness) = subsurface_flow_model.parameters
     (; slope, flow_width) = parameters
 
-    @. ssfmax = ((kh_0 * slope) / f) * (1.0 - exp(-f * soilthickness))
-    @. ssf = ((kh_0 * slope) / f) * (exp(-f * zi) - exp(-f * soilthickness)) * flow_width
+    @. q_max =
+        ((kh_0 * slope) / hydraulic_conductivity_scale_parameter) *
+        (1.0 - exp(-hydraulic_conductivity_scale_parameter * soil_thickness))
+    @. q =
+        ((kh_0 * slope) / hydraulic_conductivity_scale_parameter) *
+        (
+            exp(-hydraulic_conductivity_scale_parameter * water_table_depth) -
+            exp(-hydraulic_conductivity_scale_parameter * soil_thickness)
+        ) *
+        flow_width
     return nothing
 end
 
-function initialize_lateral_ssf!(
-    subsurface::LateralSSF,
+function initialize_lateral_ssf_model!(
+    subsurface_flow_model::LateralSSFModel,
     parameters::LandParameters,
     kh_profile::KhExponentialConstant,
 )
-    (; kh_0, f) = kh_profile.exponential
+    (; kh_0, hydraulic_conductivity_scale_parameter) = kh_profile.exponential
     (; z_exp) = kh_profile
-    (; ssf, ssfmax, zi) = subsurface.variables
-    (; soilthickness) = subsurface.parameters
+    (; q, q_max, water_table_depth) = subsurface_flow_model.variables
+    (; soil_thickness) = subsurface_flow_model.parameters
     (; slope, flow_width) = parameters
 
-    ssf_constant = @. kh_0 * exp(-f * z_exp) * slope * (soilthickness - z_exp)
-    for i in eachindex(ssf)
-        ssfmax[i] =
-            ((kh_0[i] * slope[i]) / f[i]) * (1.0 - exp(-f[i] * z_exp[i])) + ssf_constant[i]
-        if zi[i] < z_exp[i]
-            ssf[i] =
+    q_constant = @. kh_0 *
+       exp(-hydraulic_conductivity_scale_parameter * z_exp) *
+       slope *
+       (soil_thickness - z_exp)
+    for i in eachindex(q)
+        q_max[i] =
+            ((kh_0[i] * slope[i]) / hydraulic_conductivity_scale_parameter[i]) *
+            (1.0 - exp(-hydraulic_conductivity_scale_parameter[i] * z_exp[i])) +
+            q_constant[i]
+        if water_table_depth[i] < z_exp[i]
+            q[i] =
                 (
-                    ((kh_0[i] * slope[i]) / f[i]) *
-                    (exp(-f[i] * zi[i]) - exp(-f[i] * z_exp[i])) + ssf_constant[i]
+                    ((kh_0[i] * slope[i]) / hydraulic_conductivity_scale_parameter[i]) * (
+                        exp(
+                            -hydraulic_conductivity_scale_parameter[i] *
+                            water_table_depth[i],
+                        ) - exp(-hydraulic_conductivity_scale_parameter[i] * z_exp[i])
+                    ) + q_constant[i]
                 ) * flow_width[i]
         else
-            ssf[i] =
+            q[i] =
                 kh_0[i] *
-                exp(-f[i] * zi[i]) *
+                exp(-hydraulic_conductivity_scale_parameter[i] * water_table_depth[i]) *
                 slope[i] *
-                (soilthickness[i] - zi[i]) *
+                (soil_thickness[i] - water_table_depth[i]) *
                 flow_width[i]
         end
     end
@@ -905,68 +979,72 @@ function initialize_lateral_ssf!(
 end
 
 """
-    initialize_lateral_ssf!(subsurface::LateralSSF, soil::SbmSoilModel, parameters::LandParameters, kv_profile::KvLayered, dt)
-    initialize_lateral_ssf!(subsurface::LateralSSF, soil::SbmSoilModel, parameters::LandParameters, kv_profile::KvLayeredExponential, dt)
+    initialize_lateral_ssf_model!(subsurface_flow_model::LateralSSFModel, soil_model::SbmSoilModel, parameters::LandParameters, kv_profile::KvLayered, dt)
+    initialize_lateral_ssf_model!(subsurface_flow_model::LateralSSFModel, soil_model::SbmSoilModel, parameters::LandParameters, kv_profile::KvLayeredExponential, dt)
 
-Initialize lateral subsurface variables `ssf` and `ssfmax` using  vertical hydraulic
+Initialize lateral subsurface variables `q` and `q_max` using  vertical hydraulic
 conductivity profile `kv_profile`.
 """
-function initialize_lateral_ssf!(
-    subsurface::LateralSSF,
-    soil::SbmSoilModel,
+function initialize_lateral_ssf_model!(
+    subsurface_flow_model::LateralSSFModel,
+    soil_model::SbmSoilModel,
     parameters::LandParameters,
     kv_profile::KvLayered,
     dt,
 )
-    (; kh) = subsurface.parameters.kh_profile
-    (; nlayers, act_thickl) = soil.parameters
-    (; ssf, ssfmax, zi) = subsurface.variables
-    (; khfrac, soilthickness) = subsurface.parameters
+    (; kh) = subsurface_flow_model.parameters.kh_profile
+    (; number_of_layers, actual_layer_thickness) = soil_model.parameters
+    (; q, q_max, water_table_depth) = subsurface_flow_model.variables
+    (; horizontal_to_vertical_hydraulic_conductivity_ratio, soil_thickness) =
+        subsurface_flow_model.parameters
     (; slope, flow_width) = parameters
 
-    kh_layered_profile!(soil, subsurface, kv_profile, dt)
-    for i in eachindex(ssf)
-        ssf[i] = kh[i] * (soilthickness[i] - zi[i]) * slope[i] * flow_width[i]
+    kh_layered_profile!(soil_model, subsurface_flow_model, kv_profile)
+    for i in eachindex(q)
+        q[i] = kh[i] * (soil_thickness[i] - water_table_depth[i]) * slope[i] * flow_width[i]
         kh_max = 0.0
-        for j in 1:nlayers[i]
-            kh_max += kv_profile.kv[i][j] * act_thickl[i][j]
+        for j in 1:number_of_layers[i]
+            kh_max += kv_profile.kv[i][j] * actual_layer_thickness[i][j]
         end
-        kh_max = kh_max * khfrac[i] * 0.001 * 0.001
-        ssfmax[i] = kh_max * slope[i]
+        kh_max *= horizontal_to_vertical_hydraulic_conductivity_ratio[i]
+        q_max[i] = kh_max * slope[i]
     end
     return nothing
 end
 
-function initialize_lateral_ssf!(
-    subsurface::LateralSSF,
-    soil::SbmSoilModel,
+function initialize_lateral_ssf_model!(
+    subsurface_flow_model::LateralSSFModel,
+    soil_model::SbmSoilModel,
     parameters::LandParameters,
     kv_profile::KvLayeredExponential,
     dt,
 )
-    (; ssf, ssfmax, zi) = subsurface.variables
-    (; khfrac, soilthickness) = subsurface.parameters
+    (; q, q_max, water_table_depth) = subsurface_flow_model.variables
+    (; horizontal_to_vertical_hydraulic_conductivity_ratio, soil_thickness) =
+        subsurface_flow_model.parameters
     (; slope, flow_width) = parameters
-    (; nlayers, act_thickl) = soil.parameters
-    (; kh) = subsurface.parameters.kh_profile
-    (; kv, f, nlayers_kv, z_layered) = kv_profile
+    (; number_of_layers, actual_layer_thickness) = soil_model.parameters
+    (; kh) = subsurface_flow_model.parameters.kh_profile
+    (; kv, hydraulic_conductivity_scale_parameter, nlayers_kv, z_layered) = kv_profile
 
-    kh_layered_profile!(soil, subsurface, kv_profile, dt)
-    for i in eachindex(ssf)
-        ssf[i] = kh[i] * (soilthickness[i] - zi[i]) * slope[i] * flow_width[i]
+    kh_layered_profile!(soil_model, subsurface_flow_model, kv_profile)
+    for i in eachindex(q)
+        q[i] = kh[i] * (soil_thickness[i] - water_table_depth[i]) * slope[i] * flow_width[i]
         kh_max = 0.0
-        for j in 1:nlayers[i]
+        for j in 1:number_of_layers[i]
             if j <= nlayers_kv[i]
-                kh_max += kv[i][j] * act_thickl[i][j]
+                kh_max += kv[i][j] * actual_layer_thickness[i][j]
             else
-                zt = soil.parameters.soilthickness[i] - z_layered[i]
+                zt = soil_model.parameters.soil_thickness[i] - z_layered[i]
                 k = max(j - 1, 1)
-                kh_max += kv[i][k] / f[i] * (1.0 - exp(-f[i] * zt))
+                kh_max +=
+                    kv[i][k] / hydraulic_conductivity_scale_parameter[i] *
+                    (1.0 - exp(-hydraulic_conductivity_scale_parameter[i] * zt))
                 break
             end
         end
-        kh_max = kh_max * khfrac[i] * 0.001 * 0.001
-        ssfmax[i] = kh_max * slope[i]
+        kh_max = kh_max * horizontal_to_vertical_hydraulic_conductivity_ratio[i]
+        q_max[i] = kh_max * slope[i]
     end
     return nothing
 end
@@ -977,7 +1055,82 @@ end
 Return the division of `x` by `y`, bounded by a maximum value `max`, when `y` > 0.0.
 Otherwise return a `default` value.
 """
-function bounded_divide(x, y; max = 1.0, default = 0.0)
+function bounded_divide(x::Real, y::Real; max::Real = 1.0, default::Real = 0.0)::Real
     z = y > 0.0 ? min(x / y, max) : default
     return z
+end
+
+"""
+    bounded_power(base, power)
+
+Computes min(base^power, 1) without computing the power
+if the result is known to be larger than 1.
+Assumes base, power > 0
+"""
+function bounded_power(base::T, power) where {T}
+    return if base > 1
+        one(T)
+    else
+        pow(base, power)
+    end
+end
+
+"""
+The sine of the slope in radians;
+sin(arctan(x)) = x / √(1 + x²)
+"""
+sin_slope(slope) = slope / sqrt(1 + slope^2)
+
+"""
+Return water table change `dh` and exfiltration rate `exfilt`. For a falling water table
+`dh` is based on subsurface net flux `net_flux` and specific yield `specific_yield`. For a
+rising water table `dh` is based on `net_flux` and the unsaturated store capacity (per soil
+layer). For a rising water table a dynamic specific yield is computed.
+"""
+function water_table_change(
+    soil_model::SbmSoilModel,
+    net_flux::Float64,
+    specific_yield::Float64,
+    i::Int,
+    dt::Float64,
+)
+    (; n_unsatlayers, unsaturated_layer_thickness, unsaturated_layer_depth) =
+        soil_model.variables
+    (; theta_s, theta_r) = soil_model.parameters
+
+    # effective porosity (difference between saturated and residual water content)
+    theta_e = theta_s[i] - theta_r[i]
+
+    if net_flux <= 0.0
+        dh = net_flux * dt / specific_yield
+    else
+        dh = 0.0
+        for k in n_unsatlayers[i]:-1:1
+            capacity =
+                max(
+                    unsaturated_layer_thickness[i][k] * theta_e -
+                    unsaturated_layer_depth[i][k],
+                    0.0,
+                ) / dt
+            flux_layer = min(net_flux, capacity)
+            if capacity <= net_flux
+                # if unsaturated layer is fully saturated dh equals layer thickness
+                dh += unsaturated_layer_thickness[i][k]
+            else
+                sy =
+                    theta_e -
+                    (unsaturated_layer_depth[i][k] / unsaturated_layer_thickness[i][k])
+                dh += flux_layer * dt / sy
+            end
+            net_flux -= flux_layer
+            net_flux == 0.0 && break
+        end
+    end
+    exfilt = max(net_flux, 0.0)
+    return dh, exfilt
+end
+
+"Set lower bound for drainable porosity"
+function lower_bound_drainable_porosity(theta_s, theta_fc; lower_bound = 0.02)
+    return max(theta_s - theta_fc, lower_bound)
 end

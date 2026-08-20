@@ -1,12 +1,20 @@
-abstract type AbstractSubsurfaceFlowModel end
-abstract type AbstractOverlandFlowModel end
 abstract type AbstractRiverFlowModel end
+abstract type AbstractOverlandFlowModel end
+abstract type AbstractSubsurfaceFlowModel end
+
+abstract type AbstractRoutingMethod end
+abstract type AbstractStaggeredRoutingMethod <: AbstractRoutingMethod end
+
+struct Manning <: AbstractRoutingMethod end
+struct KinematicWave <: AbstractRoutingMethod end
+struct ManningStaggered <: AbstractStaggeredRoutingMethod end
+struct LocalInertial <: AbstractStaggeredRoutingMethod end
 
 struct NoSubsurfaceFlow <: AbstractSubsurfaceFlowModel end
 struct NoOverlandFlow <: AbstractOverlandFlowModel end
 struct NoRiverFlow <: AbstractRiverFlowModel end
 
-""" 
+"""
 Struct for storing routing model components overland flow `overland_flow`, river flow
 `river_flow` and subsurface flow `subsurface_flow`.
 """
