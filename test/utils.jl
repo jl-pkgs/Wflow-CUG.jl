@@ -1,4 +1,7 @@
-@testset "tosecond" begin
+@testitem "unit: tosecond" begin
+    using Dates:
+        Month, Week, Day, Hour, Minute, Second, Millisecond, Microsecond, Nanosecond
+
     @test_throws MethodError Wflow.tosecond(Month(2))
     @test Wflow.tosecond(Week(2)) == 86400 * 14
     @test Wflow.tosecond(Day(2)) == 86400 * 2
@@ -10,7 +13,9 @@
     @test Wflow.tosecond(Nanosecond(2)) == 2e-9
 end
 
-@testset "Julian day (leap days are not counted)" begin
+@testitem "unit: julian_day (leap days are not counted)" begin
+    using Dates: DateTime
+    using CFTime
     @test Wflow.julian_day(DateTime(2000, 1, 1)) == 1
     @test Wflow.julian_day(DateTime(2000, 2, 28)) == 59
     @test Wflow.julian_day(DateTime(2000, 2, 29)) == 60
@@ -20,12 +25,282 @@ end
     @test Wflow.julian_day(DateTime(2001, 2, 28)) == 59
     @test Wflow.julian_day(DateTime(2001, 3, 1)) == 60
     @test Wflow.julian_day(DateTime(2001, 12, 31)) == 365
+    @test Wflow.julian_day(CFTime.DateTimeStandard(2001, 12, 31)) == 365
+    @test Wflow.julian_day(CFTime.DateTime360Day(2001, 12, 30)) == 360
 end
 
-@testset "Bounded divide" begin
+@testitem "unit: bounded_divide" begin
     @test Wflow.bounded_divide(1.0, 0.0) == 0.0
-    @test Wflow.bounded_divide(1.0, 0.0, default = 0.5) == 0.5
+    @test Wflow.bounded_divide(1.0, 0.0; default = 0.5) == 0.5
     @test Wflow.bounded_divide(1.0, 0.5) == 1.0
-    @test Wflow.bounded_divide(1.0, 0.5, max = 0.75) == 0.75
+    @test Wflow.bounded_divide(1.0, 0.5; max = 0.75) == 0.75
     @test Wflow.bounded_divide(1.0, 2.0) == 0.5
+end
+
+@testitem "unit: Units" begin
+    using Wflow: Unit, to_SI_factor, to_SI, to_string, ABSOLUTE_DEGREES
+
+    @test to_SI_factor(ABSOLUTE_DEGREES) == 1.0
+    @test to_SI(0.0, ABSOLUTE_DEGREES) == 273.15
+    @test string(ABSOLUTE_DEGREES) == "°C"
+
+    unit = Unit(; degC = 1) # relative degrees
+    @test to_SI_factor(unit) == 1.0
+    @test to_SI(0.0, unit) == 0.0
+
+    dt = 86400.0
+    unit = Unit(; m = 1, dt = -1)
+    @test_throws Exception to_SI(unit, 1.0)
+    @test to_SI_factor(unit; dt_val = dt) == inv(dt)
+    @test string(unit) == "m Δt⁻¹"
+    @test to_string(unit; BMI_standard = true) == "m Δt-1"
+
+    unit = Unit(; s = 1, m = -1 // 3)
+    @test to_SI_factor(unit) == 1.0
+    @test string(unit) == "s m⁻¹ᐟ³"
+    @test to_string(unit; BMI_standard = true) == "s m-1/3"
+
+    @test_throws Exception Unit(; foo = 42)
+end
+
+@testitem "unit: scurve" begin
+    a = 0.0
+    b = 3.0
+    c = 2.5
+
+    x = 2.0
+    out = Wflow.scurve(x, a, b, c)
+    @test out ≈ 0.3325863502664285
+
+    f = π
+    @test f * Wflow.scurve(x, a + log(f) / c, f * b, c) ≈ out
+end
+
+@testitem "unit: Units" begin
+    using Wflow: Unit, to_SI_factor, to_SI, to_string, ABSOLUTE_DEGREES
+
+    @test to_SI_factor(ABSOLUTE_DEGREES) == 1.0
+    @test to_SI(0.0, ABSOLUTE_DEGREES) == 273.15
+    @test string(ABSOLUTE_DEGREES) == "°C"
+
+    unit = Unit(; degC = 1) # relative degrees
+    @test to_SI_factor(unit) == 1.0
+    @test to_SI(0.0, unit) == 0.0
+
+    dt = 86400.0
+    unit = Unit(; m = 1, dt = -1)
+    @test_throws Exception to_SI(unit, 1.0)
+    @test to_SI_factor(unit; dt_val = dt) == inv(dt)
+    @test string(unit) == "m Δt⁻¹"
+    @test to_string(unit; BMI_standard = true) == "m Δt-1"
+
+    unit = Unit(; s = 1, m = -1 // 3)
+    @test to_SI_factor(unit) == 1.0
+    @test string(unit) == "s m⁻¹ᐟ³"
+    @test to_string(unit; BMI_standard = true) == "s m-1/3"
+
+    @test_throws Exception Unit(; foo = 42)
+end
+
+@testitem "unit: compute_mass_balance_error" begin
+    total_in = 5.0
+    total_out = 5.0
+    storage_rate = 0.0
+    error, relative_error =
+        Wflow.compute_mass_balance_error(total_in, total_out, storage_rate)
+    @test iszero(error)
+    @test iszero(relative_error)
+
+    total_out = 6.0
+    error, relative_error =
+        Wflow.compute_mass_balance_error(total_in, total_out, storage_rate)
+    @test error == -1.0
+    @test relative_error ≈ -2 / 11
+end
+
+@testitem "unit: variable tags" begin
+    for (map_name, map) in Wflow.STANDARD_NAME_MAPS
+        @testset "Check that each $map_name variable has at least one tag" begin
+            vars_without_tags = String[]
+            for (name, metadata) in map
+                isempty(metadata.tags) && push!(vars_without_tags, name)
+            end
+            @test isempty(vars_without_tags)
+        end
+    end
+end
+
+@testitem "Lenses and writing config" begin
+    using Accessors: @optic
+    using TOML: TOML
+    configs = Wflow.Config[]
+
+    for file_name in [
+        "sbm_gwf_config.toml",
+        "sbm_river-floodplain-staggered-scheme_config.toml",
+        "sbm_river-land-local-inertial_config.toml",
+        "sbm_gwf_piave_demand_config.toml",
+        "sediment_config.toml",
+        "sediment_eurosem_engelund_config.toml",
+    ]
+        config = Wflow.Config(normpath(@__DIR__, file_name))
+        config.dir_output = mktempdir()
+        config.model.water_mass_balance__flag = true
+        push!(configs, config)
+    end
+
+    for transport_method in ("kodatie", "govers", "yalin")
+        config = Wflow.Config(normpath(@__DIR__, "sediment_eurosem_engelund_config.toml"))
+        config.dir_output = mktempdir()
+        if transport_method == "kodatie"
+            config.model.river_transport = transport_method
+        else
+            config.model.run_river_model__flag = false
+            config.model.land_transport = transport_method
+        end
+        push!(configs, config)
+    end
+
+    models = similar(configs, Wflow.Model)
+    map!(Wflow.Model, models, configs)
+
+    for (map_name, standard_name_map) in Wflow.STANDARD_NAME_MAPS
+        @testset "Test lenses: $map_name" begin
+            invalid = String[]
+            for (name, data) in standard_name_map
+                (; lens) = data
+                isnothing(lens) && continue
+                valid = false
+                for model in models
+                    try
+                        lens(model)
+                        valid = true
+                        break
+                    catch
+                        nothing
+                    end
+                end
+                valid || push!(invalid, name)
+            end
+            expected_invalids = if map_name == "sbm"
+                # The lenses associated with these standard names aren't actually invalid,
+                # these parameters are just not used in any test model
+                Set([
+                    "soil_exponential_vertical_saturated_hydraulic_conductivity_profile_below_surface__depth",
+                    "soil_layer_water__vertical_saturated_hydraulic_conductivity",
+                ])
+            elseif map_name == "routing"
+                # The lens of this standard name is valid but not part of any test model.
+                Set(["floodplain__slope"])
+            else
+                Set{String}()
+            end
+            @test Set(invalid) == expected_invalids
+        end
+    end
+
+    # Find duplicate lenses
+    lenses = vcat(
+        [
+            getfield.(values(standard_name_map), :lens) for
+            (_, standard_name_map) in Wflow.STANDARD_NAME_MAPS
+        ]...,
+    )
+    filter!(!isnothing, lenses)
+    duplicates = Set()
+    for unique_lens in unique(lenses)
+        if count(==(unique_lens), lenses) > 1
+            push!(duplicates, unique_lens)
+        end
+    end
+    @test duplicates == Set([@optic(_.land.atmospheric_forcing.precipitation)])
+
+    # Write and read the config and check equality
+    function Base.:(==)(a::T, b::T) where {T <: Wflow.AbstractConfigSection}
+        equality = true
+        for f in fieldnames(T)
+            f == :path && continue # Check all fields except path
+            field_equality = (getfield(a, f) == getfield(b, f))
+            equality &= field_equality
+        end
+        return equality
+    end
+
+    invalids = String[]
+    for model in models
+        path = normpath(model.config.dir_output, "config.toml")
+        open(path, "w") do io
+            TOML.print(io, Wflow.to_dict(model.config))
+        end
+        config_read = Wflow.Config(path)
+        !(model.config == config_read) && push!(invalids, model.config.path)
+    end
+    @test isempty(invalids)
+end
+
+@testitem "unit: water_table_change" begin
+    using Wflow: to_SI, MM, Unit
+    M_PER_DAY = Unit(; m = 1, d = -1)
+    using StaticArrays: SVector
+    include("testing_utils.jl")
+    dt = 86400.0
+    n = 1
+    N = 5
+    specific_yield = 0.43
+    i = 1
+
+    soil = init_sbm_soil_model(
+        n,
+        N;
+        unsaturated_layer_depth = [SVector(0.1, 0.125, 0.15, 0.17500000000000002, 0.2)],
+        unsaturated_layer_thickness = [
+            SVector(0.11, 0.145, 0.17, 0.20500000000000002, 0.24),
+        ],
+        maximum_number_of_layers = 5,
+        theta_s = [0.98],
+        theta_r = [0.02],
+        n_unsatlayers = [5],
+    )
+
+    # Case: (net_flux ≤ 0.0)
+    net_flux = -1.1574074074074073e-5
+    dh, exfilt = Wflow.water_table_change(soil, net_flux, specific_yield, i, dt)
+    @test dh ≈ -2.3255813953488373
+    @test iszero(exfilt)
+
+    # Case: !(net_flux ≤ 0.0)
+    # Hitting both (capacity <= net_flux) and !(capacity <= net_flux)
+    net_flux = 5.787037037037037e-7
+    dh, exfilt = Wflow.water_table_change(soil, net_flux, specific_yield, i, dt)
+    @test dh ≈ 0.4243119266055048
+    @test iszero(exfilt)
+end
+
+@testitem "Variable tags" begin
+    for (map_name, map) in Wflow.STANDARD_NAME_MAPS
+        @testset "Check that each $map_name variable has at least one tag" begin
+            vars_without_tags = String[]
+            for (name, metadata) in map
+                isempty(metadata.tags) && push!(vars_without_tags, name)
+            end
+            @test isempty(vars_without_tags)
+        end
+    end
+end
+
+@testitem "unit: Affine transform" begin
+    using Wflow: apply_affine_transform!, InputEntry
+
+    v = [3.5, 4.7, 2.4]
+
+    @test apply_affine_transform!(copy(v), InputEntry(; scale = [2.0])) == 2 * v
+    @test apply_affine_transform!(copy(v), InputEntry(; scale = fill(3.0, 3))) == 3 * v
+
+    @test apply_affine_transform!(copy(v), InputEntry(; offset = [4.0])) == v .+ 4.0
+    @test apply_affine_transform!(copy(v), InputEntry(; offset = fill(5.0, 3))) == v .+ 5.0
+
+    @test apply_affine_transform!(
+        copy(v),
+        InputEntry(; scale = [6.0], offset = fill(7.0, 3)),
+    ) == 6.0 * v .+ 7.0
 end

@@ -12,8 +12,8 @@ timestepsecs = 86400
 loglevel = "info"
 
 [state]
-path_input = "instates-piave-gwf.nc"
-path_output = "outstates-piave-gwf.nc"
+path_input = "instates-piave.nc"
+path_output = "outstates-piave.nc"
 
 [state.variables]
 vegetation_canopy_water__depth = "canopystorage"
@@ -24,12 +24,11 @@ snowpack_dry_snow__leq_depth = "snow"
 snowpack_liquid_water__depth = "snowwater"
 land_surface_water__instantaneous_volume_flow_rate = "q_land"
 land_surface_water__depth = "h_land"
+subsurface_water__instantaneous_volume_flow_rate = "ssf"
 river_water__instantaneous_volume_flow_rate = "q_river"
 river_water__depth = "h_river"
 reservoir_water_surface__elevation = "waterlevel_reservoir"
 glacier_ice__leq_depth = "glacierstore"
-paddy_surface_water__depth = "h_paddy"
-subsurface_water__hydraulic_head = "head"
 
 [input]
 path_forcing = "forcing-piave.nc"
@@ -37,11 +36,11 @@ path_static = "staticmaps-piave.nc"
 
 basin__local_drain_direction = "wflow_ldd"
 river_location__mask = "wflow_river"
-reservoir_area__count = "wflow_reservoirareas"
-reservoir_location__count = "wflow_reservoirlocs"
 subbasin_location__count = "wflow_subcatch"
 river_gauge__count = "wflow_gauges"
 river_gauge_grdc__count = "wflow_gauges_grdc"
+reservoir_area__count = "wflow_reservoirareas"
+reservoir_location__count = "wflow_reservoirlocs"
 
 [input.forcing]
 atmosphere_water__precipitation_volume_flux = "precip"
@@ -95,12 +94,7 @@ land_surface_water__withdrawal_fraction = "frac_sw_used"
 soil_layer_water__vertical_saturated_hydraulic_conductivity_factor = "kvfrac"
 irrigated_paddy_area__count = "paddy_irrigation_areas"
 irrigated_non_paddy_area__count = "nonpaddy_irrigation_areas"
-model_constant_boundary_condition__hydraulic_head = "constant_head"
-subsurface_surface_water__horizontal_saturated_hydraulic_conductivity = "kh_surface"
-river_bottom__elevation = "zb_river"
-river_water__infiltration_conductance = "riverbed_cond"
-river_water__exfiltration_conductance = "riverbed_cond"
-subsurface__horizontal_saturated_hydraulic_conductivity_scale_parameter = "gwf_f"
+subsurface_water__horizontal_to_vertical_saturated_hydraulic_conductivity_ratio.value = 100
 
 [input.cyclic]
 vegetation__leaf_area_index = "LAI"
@@ -108,14 +102,9 @@ domestic__gross_water_demand_volume_flux = "domestic_gross"
 domestic__net_water_demand_volume_flux = "domestic_net"
 industry__gross_water_demand_volume_flux = "industry_gross"
 industry__net_water_demand_volume_flux = "industry_net"
-livestock__gross_water_demand_volume_flux = "livestock_gross"
-livestock__net_water_demand_volume_flux = "livestock_net"
-irrigated_paddy__irrigation_trigger_flag = "paddy_irrigation_trigger"
-irrigated_non_paddy__irrigation_trigger_flag = "nonpaddy_irrigation_trigger"
 
 [model]
-type = "sbm_gwf"
-constanthead__flag = true
+type = "sbm"
 snow_gravitational_transport__flag = true
 snow__flag = true
 cold_start__flag = false
@@ -124,26 +113,23 @@ glacier__flag = true
 kinematic_wave__adaptive_time_step_flag = true
 soil_layer__thickness = [50, 100, 50, 200, 800]
 river_routing = "kinematic_wave"
-conductivity_profile = "exponential"
-subsurface_water_flow__alpha_coefficient = 0.001
 
 [model.water_demand]
 domestic__flag = true
 industry__flag = true
-livestock__flag = true
-paddy__flag = true
-nonpaddy__flag = true
+livestock__flag = false
+paddy__flag = false
+nonpaddy__flag = false
 
 [output.netcdf_grid]
-path = "output-piave-gwf.nc"
+path = "output-piave-demand.nc"
 
 [output.netcdf_grid.variables]
 river_water__volume_flow_rate = "q_av_river"
-subsurface_water__hydraulic_head = "head"
 soil_water_saturated_zone_top__depth = "zi"
 
 [output.csv]
-path = "output.csv"
+path = "output-piave-demand.csv"
 
 [[output.csv.column]]
 header = "Q"
@@ -154,3 +140,15 @@ parameter = "river_water__volume_flow_rate"
 header = "Q"
 map = "river_gauge_grdc__count"
 parameter = "river_water__volume_flow_rate"
+
+[[output.csv.column]]
+coordinate.x = 12.7243
+coordinate.y = 45.5851
+header = "nonirri_h_bycoord"
+parameter = "land__allocated_non_irrigation_water_volume_flux"
+
+[[output.csv.column]]
+coordinate.x = 12.7243
+coordinate.y = 45.5851
+header = "irri_bycoord"
+parameter = "land__allocated_irrigation_water_volume_flux"
